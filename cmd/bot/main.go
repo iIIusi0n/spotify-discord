@@ -42,6 +42,11 @@ var (
 				},
 			},
 		},
+		{
+			Name:        "leave",
+			Description: "Leave the voice channel",
+			Type:        discordgo.ChatApplicationCommand,
+		},
 	}
 
 	commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.InteractionCreate){
@@ -64,8 +69,7 @@ var (
 			}
 
 			voiceChannelID := data.Options[0].ChannelValue(s)
-			commandChannelID := i.ChannelID
-			proxy, err = redirector.NewRedirector(s, guildID, voiceChannelID.ID, commandChannelID, token)
+			proxy, err = redirector.NewRedirector(s, guildID, voiceChannelID.ID, token)
 			if err != nil {
 				s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 					Type: discordgo.InteractionResponseChannelMessageWithSource,
@@ -75,12 +79,28 @@ var (
 				})
 				return
 			}
-			go proxy.Start()
+			go func() {
+				if err := proxy.Start(); err != nil {
+					log.Printf("Redirector failed to start: %v", err)
+				}
+			}()
 
 			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 				Type: discordgo.InteractionResponseChannelMessageWithSource,
 				Data: &discordgo.InteractionResponseData{
 					Content: "Joined voice channel",
+				},
+			})
+		},
+		"leave": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+			if proxy != nil {
+				proxy.Stop()
+			}
+
+			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Content: "Left voice channel",
 				},
 			})
 		},
