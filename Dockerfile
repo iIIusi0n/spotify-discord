@@ -25,7 +25,7 @@ RUN go build -o /output/spotify-discord /app/cmd/bot
 
 FROM alpine:3.20.3
 
-RUN apk add --no-cache opus
+RUN apk add --no-cache opus sox
 
 RUN mkdir -p /app
 WORKDIR /app

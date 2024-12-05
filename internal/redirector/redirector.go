@@ -3,12 +3,14 @@ package redirector
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
 	"syscall"
+	"text/template"
 	"time"
 
 	"github.com/bwmarrin/dgvoice"
@@ -17,6 +19,7 @@ import (
 
 var (
 	librespotOutputPath = "/tmp/librespot.out"
+	librespotLogPath    = "/tmp/librespot.log"
 	librespotPath       = "/usr/bin/librespot"
 	librespotArgs       = []string{
 		"--name", "SpeakerPI",
@@ -46,13 +49,32 @@ type Redirector struct {
 func NewRedirector(botSession *discordgo.Session, guildID, voiceChannelID, spotifyAccessToken string) (*Redirector, error) {
 	log.Printf("Creating redirector for guild %s, voice channel %s", guildID, voiceChannelID)
 
-	librespotArgs[2] = strings.Replace(librespotArgs[2], "{{ .AccessToken }}", spotifyAccessToken, 1)
-	librespotArgs[4] = strings.Replace(librespotArgs[4], "{{ .OutputPath }}", librespotOutputPath, 1)
+	tmpl := template.Must(template.New("args").Parse(strings.Join(librespotArgs, " ")))
+	var buf strings.Builder
+	if err := tmpl.Execute(&buf, struct {
+		AccessToken string
+		OutputPath  string
+	}{
+		AccessToken: spotifyAccessToken,
+		OutputPath:  librespotOutputPath,
+	}); err != nil {
+		return nil, fmt.Errorf("failed to execute template: %v", err)
+	}
+	librespotArgs = strings.Split(buf.String(), " ")
+
+	logFile, err := os.OpenFile(librespotLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open log file: %v", err)
+	}
 
 	cmd := exec.Command(librespotPath, librespotArgs...)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
 	if err := cmd.Start(); err != nil {
-		log.Fatalf("Failed to start librespot: %v", err)
+		logFile.Close()
+		return nil, fmt.Errorf("failed to start librespot: %v", err)
 	}
+	log.Printf("Started librespot with args %v", librespotArgs)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -70,19 +92,13 @@ func NewRedirector(botSession *discordgo.Session, guildID, voiceChannelID, spoti
 
 func (r *Redirector) checkLibrespot() error {
 	if err := r.cmd.Process.Signal(syscall.Signal(0)); err != nil {
-		output, err := r.cmd.Output()
-		if err != nil {
-			return fmt.Errorf("librespot process died: %v", err)
+		output, readErr := os.ReadFile(librespotLogPath)
+		if readErr != nil {
+			return fmt.Errorf("librespot process died: %v (failed to read logs: %v)", err, readErr)
 		}
 		return fmt.Errorf("librespot process died: %v\n%s", err, string(output))
 	}
 	return nil
-}
-
-func (r *Redirector) Clear() error {
-	r.mutex.Lock()
-	defer r.mutex.Unlock()
-	return clearFifo(librespotOutputPath)
 }
 
 func (r *Redirector) Start() error {
@@ -99,28 +115,53 @@ func (r *Redirector) Start() error {
 	r.voiceChannel = voiceChannel
 	log.Printf("Joined voice channel %s", r.voiceChannelID)
 
-	file, err := os.OpenFile(librespotOutputPath, os.O_RDONLY, 0644)
+	cmd := exec.Command("sox",
+		"-t", "raw",
+		"-c", "2",
+		"-r", "44.1k",
+		"-e", "signed-integer",
+		"-L",
+		"-b", "16",
+		librespotOutputPath,
+		"-t", "raw",
+		"-r", "48k",
+		"-b", "24",
+		"--norm",
+		"-",
+		"rate -v")
+
+	soxOut, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
 	}
-	log.Printf("Opened FIFO %s", librespotOutputPath)
+
+	if err := cmd.Start(); err != nil {
+		return err
+	}
 
 	go dgvoice.SendPCM(voiceChannel, r.send)
 
+	buffer := make([]byte, 3840)
 	for {
 		select {
 		case <-r.ctx.Done():
 			return nil
 		default:
-			r.mutex.Lock()
-			samples, err := readFifo(file)
-			r.mutex.Unlock()
-
+			n, err := soxOut.Read(buffer)
+			if err == io.EOF {
+				return nil
+			}
 			if err != nil {
+				close(r.send)
 				return err
 			}
 
-			r.send <- samples
+			pcmData := make([]int16, n/2)
+			for i := 0; i < n; i += 2 {
+				pcmData[i/2] = int16(buffer[i]) | (int16(buffer[i+1]) << 8)
+			}
+
+			r.send <- pcmData
 		}
 	}
 }
