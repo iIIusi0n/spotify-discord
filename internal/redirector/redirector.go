@@ -1,6 +1,7 @@
 package redirector
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -36,6 +37,9 @@ type Redirector struct {
 	spotifyAccessToken string
 	send               chan []int16
 	mutex              sync.Mutex
+	process            *os.Process
+	cancel             context.CancelFunc
+	ctx                context.Context
 }
 
 func NewRedirector(botSession *discordgo.Session, guildID, channelID, spotifyAccessToken string) (*Redirector, error) {
@@ -58,12 +62,17 @@ func NewRedirector(botSession *discordgo.Session, guildID, channelID, spotifyAcc
 		return nil, fmt.Errorf("librespot process died within 10 seconds of starting: %v\n%s", cmd.ProcessState.String(), string(output))
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+
 	return &Redirector{
 		botSession:         botSession,
 		guildID:            guildID,
 		channelID:          channelID,
 		spotifyAccessToken: spotifyAccessToken,
 		send:               make(chan []int16, 2),
+		process:            cmd.Process,
+		ctx:                ctx,
+		cancel:             cancel,
 	}, nil
 }
 
@@ -87,14 +96,24 @@ func (r *Redirector) Start() error {
 	go dgvoice.SendPCM(voiceChannel, r.send)
 
 	for {
-		r.mutex.Lock()
-		samples, err := readFifo(file)
-		r.mutex.Unlock()
+		select {
+		case <-r.ctx.Done():
+			return nil
+		default:
+			r.mutex.Lock()
+			samples, err := readFifo(file)
+			r.mutex.Unlock()
 
-		if err != nil {
-			return err
+			if err != nil {
+				return err
+			}
+
+			r.send <- samples
 		}
-
-		r.send <- samples
 	}
+}
+
+func (r *Redirector) Stop() error {
+	r.cancel()
+	return r.process.Kill()
 }
