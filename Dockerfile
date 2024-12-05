@@ -10,6 +10,9 @@ RUN cargo build --release --no-default-features && \
 
 FROM golang:1.23.4-alpine3.20 AS app-builder
 
+RUN apk add --no-cache gcc musl-dev opus-dev pkgconfig
+ENV CGO_ENABLED=1
+
 RUN mkdir -p /app /output
 WORKDIR /app
 
@@ -21,6 +24,8 @@ COPY go.sum /app
 RUN go build -o /output/spotify-discord /app/cmd/bot
 
 FROM alpine:3.20.3
+
+RUN apk add --no-cache opus
 
 RUN mkdir -p /app
 WORKDIR /app

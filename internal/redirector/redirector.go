@@ -32,12 +32,13 @@ var (
 
 type Redirector struct {
 	botSession         *discordgo.Session
+	voiceChannel       *discordgo.VoiceConnection
 	guildID            string
 	channelID          string
 	spotifyAccessToken string
 	send               chan []int16
 	mutex              sync.Mutex
-	process            *os.Process
+	cmd                *exec.Cmd
 	cancel             context.CancelFunc
 	ctx                context.Context
 }
@@ -51,17 +52,6 @@ func NewRedirector(botSession *discordgo.Session, guildID, channelID, spotifyAcc
 		log.Fatalf("Failed to start librespot: %v", err)
 	}
 
-	time.Sleep(10 * time.Second)
-
-	if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
-		output, err := cmd.Output()
-		if err != nil {
-			return nil, fmt.Errorf("librespot process died within 10 seconds of starting: %v", cmd.ProcessState.String())
-		}
-
-		return nil, fmt.Errorf("librespot process died within 10 seconds of starting: %v\n%s", cmd.ProcessState.String(), string(output))
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &Redirector{
@@ -70,10 +60,21 @@ func NewRedirector(botSession *discordgo.Session, guildID, channelID, spotifyAcc
 		channelID:          channelID,
 		spotifyAccessToken: spotifyAccessToken,
 		send:               make(chan []int16, 2),
-		process:            cmd.Process,
+		cmd:                cmd,
 		ctx:                ctx,
 		cancel:             cancel,
 	}, nil
+}
+
+func (r *Redirector) checkLibrespot() error {
+	if err := r.cmd.Process.Signal(syscall.Signal(0)); err != nil {
+		output, err := r.cmd.Output()
+		if err != nil {
+			return fmt.Errorf("librespot process died: %v", err)
+		}
+		return fmt.Errorf("librespot process died: %v\n%s", err, string(output))
+	}
+	return nil
 }
 
 func (r *Redirector) Clear() error {
@@ -83,10 +84,13 @@ func (r *Redirector) Clear() error {
 }
 
 func (r *Redirector) Start() error {
+	go r.healthChecker()
+
 	voiceChannel, err := r.botSession.ChannelVoiceJoin(r.guildID, r.channelID, false, true)
 	if err != nil {
 		return err
 	}
+	r.voiceChannel = voiceChannel
 
 	file, err := os.OpenFile(librespotOutputPath, os.O_RDONLY, 0644)
 	if err != nil {
@@ -115,5 +119,19 @@ func (r *Redirector) Start() error {
 
 func (r *Redirector) Stop() error {
 	r.cancel()
-	return r.process.Kill()
+	r.voiceChannel.Disconnect()
+	return r.cmd.Process.Kill()
+}
+
+func (r *Redirector) healthChecker() error {
+	for {
+		if err := r.checkLibrespot(); err != nil {
+			log.Printf("Health check failed: %v", err)
+			if stopErr := r.Stop(); stopErr != nil {
+				log.Printf("Failed to stop redirector: %v", stopErr)
+			}
+			return err
+		}
+		time.Sleep(10 * time.Second)
+	}
 }

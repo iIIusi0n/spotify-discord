@@ -6,12 +6,12 @@ import (
 	"os"
 	"os/signal"
 	"spotify-discord/internal/auth"
+	"spotify-discord/internal/redirector"
 
 	"github.com/bwmarrin/discordgo"
 )
 
 var (
-	session             *discordgo.Session
 	oauthAccessURL      = os.Getenv("OAUTH_ACCESS_URL")
 	spotifyClientID     = os.Getenv("SPOTIFY_OAUTH_CLIENT_ID")
 	spotifyClientSecret = os.Getenv("SPOTIFY_OAUTH_CLIENT_SECRET")
@@ -21,7 +21,26 @@ var (
 )
 
 var (
+	authorizer *auth.SpotifyAuthorizer
+	session    *discordgo.Session
+	proxy      *redirector.Redirector
+)
+
+var (
 	commands = []*discordgo.ApplicationCommand{
+		{
+			Name:        "join",
+			Description: "Join the voice channel",
+			Type:        discordgo.ChatApplicationCommand,
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Name:        "channel",
+					Description: "The channel to join",
+					Type:        discordgo.ApplicationCommandOptionChannel,
+					Required:    true,
+				},
+			},
+		},
 		{
 			Name:        "single-autocomplete",
 			Description: "Showcase of single autocomplete option",
@@ -60,6 +79,43 @@ var (
 	}
 
 	commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.InteractionCreate){
+		"join": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+			data := i.ApplicationCommandData()
+
+			token, err := authorizer.AccessToken()
+			if err != nil {
+				s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+					Type: discordgo.InteractionResponseChannelMessageWithSource,
+					Data: &discordgo.InteractionResponseData{
+						Content: fmt.Sprintf("Failed to get access token, login to Spotify first: %s", oauthAccessURL),
+					},
+				})
+				return
+			}
+
+			if proxy != nil {
+				proxy.Stop()
+			}
+
+			channelID := data.Options[0].ChannelValue(s)
+			proxy, err = redirector.NewRedirector(s, guildID, channelID.ID, token)
+			if err != nil {
+				s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+					Type: discordgo.InteractionResponseChannelMessageWithSource,
+					Data: &discordgo.InteractionResponseData{
+						Content: fmt.Sprintf("Failed to start redirector: %v", err),
+					},
+				})
+				return
+			}
+
+			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Content: "Joined voice channel",
+				},
+			})
+		},
 		"single-autocomplete": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			switch i.Type {
 			case discordgo.InteractionApplicationCommand:
@@ -212,7 +268,7 @@ var (
 )
 
 func init() {
-	authorizer := auth.NewSpotifyAuthorizer(spotifyClientID, spotifyClientSecret, oauthAccessURL, debugMode)
+	authorizer = auth.NewSpotifyAuthorizer(spotifyClientID, spotifyClientSecret, oauthAccessURL, debugMode)
 	go authorizer.StartOAuthServer()
 }
 
