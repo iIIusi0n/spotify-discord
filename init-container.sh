@@ -13,4 +13,14 @@ if [ -z "$SPOTIFY_OAUTH_CLIENT_SECRET" ]; then
     exit 1
 fi
 
+if [ -z "$DISCORD_BOT_TOKEN" ]; then
+    echo "Error: DISCORD_BOT_TOKEN environment variable is not set" 
+    exit 1
+fi
+
+if [ -z "$DISCORD_GUILD_ID" ]; then
+    echo "Error: DISCORD_GUILD_ID environment variable is not set" 
+    exit 1
+fi
+
 exec /app/spotify-discord

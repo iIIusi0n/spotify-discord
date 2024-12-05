@@ -5,6 +5,13 @@ go 1.23.1
 require github.com/gin-gonic/gin v1.10.0
 
 require (
+	github.com/bwmarrin/dgvoice v0.0.0-20210225172318-caaac756e02e // indirect
+	github.com/gorilla/websocket v1.4.2 // indirect
+	layeh.com/gopus v0.0.0-20210501142526-1ee02d434e32 // indirect
+)
+
+require (
+	github.com/bwmarrin/discordgo v0.28.1
 	github.com/bytedance/sonic v1.11.6 // indirect
 	github.com/bytedance/sonic/loader v0.1.1 // indirect
 	github.com/cloudwego/base64x v0.1.4 // indirect
