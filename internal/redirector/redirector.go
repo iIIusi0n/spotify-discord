@@ -125,6 +125,7 @@ func (r *Redirector) Start() error {
 		librespotOutputPath,
 		"-t", "raw",
 		"-r", "48k",
+		"-c", "2",
 		"-")
 
 	soxOut, err := cmd.StdoutPipe()
