@@ -34,7 +34,8 @@ type Redirector struct {
 	botSession         *discordgo.Session
 	voiceChannel       *discordgo.VoiceConnection
 	guildID            string
-	channelID          string
+	voiceChannelID     string
+	commandChannelID   string
 	spotifyAccessToken string
 	send               chan []int16
 	mutex              sync.Mutex
@@ -43,7 +44,7 @@ type Redirector struct {
 	ctx                context.Context
 }
 
-func NewRedirector(botSession *discordgo.Session, guildID, channelID, spotifyAccessToken string) (*Redirector, error) {
+func NewRedirector(botSession *discordgo.Session, guildID, voiceChannelID, commandChannelID, spotifyAccessToken string) (*Redirector, error) {
 	librespotArgs[2] = strings.Replace(librespotArgs[2], "{{ .AccessToken }}", spotifyAccessToken, 1)
 	librespotArgs[4] = strings.Replace(librespotArgs[4], "{{ .OutputPath }}", librespotOutputPath, 1)
 
@@ -57,7 +58,8 @@ func NewRedirector(botSession *discordgo.Session, guildID, channelID, spotifyAcc
 	return &Redirector{
 		botSession:         botSession,
 		guildID:            guildID,
-		channelID:          channelID,
+		voiceChannelID:     voiceChannelID,
+		commandChannelID:   commandChannelID,
 		spotifyAccessToken: spotifyAccessToken,
 		send:               make(chan []int16, 2),
 		cmd:                cmd,
@@ -86,7 +88,7 @@ func (r *Redirector) Clear() error {
 func (r *Redirector) Start() error {
 	go r.healthChecker()
 
-	voiceChannel, err := r.botSession.ChannelVoiceJoin(r.guildID, r.channelID, false, true)
+	voiceChannel, err := r.botSession.ChannelVoiceJoin(r.guildID, r.voiceChannelID, false, true)
 	if err != nil {
 		return err
 	}
@@ -119,7 +121,9 @@ func (r *Redirector) Start() error {
 
 func (r *Redirector) Stop() error {
 	r.cancel()
-	r.voiceChannel.Disconnect()
+	if r.voiceChannel != nil {
+		r.voiceChannel.Disconnect()
+	}
 	return r.cmd.Process.Kill()
 }
 
@@ -130,6 +134,7 @@ func (r *Redirector) healthChecker() error {
 			if stopErr := r.Stop(); stopErr != nil {
 				log.Printf("Failed to stop redirector: %v", stopErr)
 			}
+			r.botSession.ChannelMessageSend(r.commandChannelID, fmt.Sprintf("Redirector health check failed, reconnecting... %v", err))
 			return err
 		}
 		time.Sleep(10 * time.Second)
