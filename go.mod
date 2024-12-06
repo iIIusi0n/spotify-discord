@@ -7,6 +7,7 @@ require github.com/gin-gonic/gin v1.10.0
 require (
 	github.com/bwmarrin/dgvoice v0.0.0-20210225172318-caaac756e02e // indirect
 	github.com/gorilla/websocket v1.4.2 // indirect
+	github.com/zmb3/spotify/v2 v2.4.3 // indirect
 	layeh.com/gopus v0.0.0-20210501142526-1ee02d434e32 // indirect
 )
 

@@ -7,114 +7,147 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"strings"
 	"sync"
 	"syscall"
-	"text/template"
 	"time"
 
 	"github.com/bwmarrin/dgvoice"
 	"github.com/bwmarrin/discordgo"
 )
 
-var (
+const (
 	librespotOutputPath = "/tmp/librespot.out"
 	librespotLogPath    = "/tmp/librespot.log"
 	librespotPath       = "/usr/bin/librespot"
-	librespotArgs       = []string{
-		"--name", "SpeakerPI",
-		"--bitrate", "320",
-		"--access-token", "{{ .AccessToken }}",
-		"--backend", "pipe",
-		"--device", "{{ .OutputPath }}",
-		"--format", "S16",
-		"--initial-volume", "100",
-		"--enable-volume-normalisation",
-	}
 )
 
-type Redirector struct {
-	botSession         *discordgo.Session
-	voiceChannel       *discordgo.VoiceConnection
-	guildID            string
-	voiceChannelID     string
-	spotifyAccessToken string
-	send               chan []int16
-	mutex              sync.Mutex
-	cmd                *exec.Cmd
-	cancel             context.CancelFunc
-	ctx                context.Context
+type LibrespotConfig struct {
+	Name            string
+	Bitrate         string
+	AccessToken     string
+	Backend         string
+	Device          string
+	Format          string
+	InitialVolume   string
+	VolumeNormalise bool
 }
 
-func NewRedirector(botSession *discordgo.Session, guildID, voiceChannelID, spotifyAccessToken string) (*Redirector, error) {
-	log.Printf("Creating redirector for guild %s, voice channel %s", guildID, voiceChannelID)
-
-	tmpl := template.Must(template.New("args").Parse(strings.Join(librespotArgs, " ")))
-	var buf strings.Builder
-	if err := tmpl.Execute(&buf, struct {
-		AccessToken string
-		OutputPath  string
-	}{
-		AccessToken: spotifyAccessToken,
-		OutputPath:  librespotOutputPath,
-	}); err != nil {
-		return nil, fmt.Errorf("failed to execute template: %v", err)
+func NewLibrespotConfig(accessToken string) *LibrespotConfig {
+	return &LibrespotConfig{
+		Name:            "SpeakerPI",
+		Bitrate:         "320",
+		AccessToken:     accessToken,
+		Backend:         "pipe",
+		Device:          librespotOutputPath,
+		Format:          "S16",
+		InitialVolume:   "100",
+		VolumeNormalise: true,
 	}
-	librespotArgs = strings.Split(buf.String(), " ")
+}
 
-	logFile, err := os.OpenFile(librespotLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open log file: %v", err)
-	}
+type Redirector struct {
+	botSession   *discordgo.Session
+	voiceChannel *discordgo.VoiceConnection
+	guildID      string
+	channelID    string
 
-	cmd := exec.Command(librespotPath, librespotArgs...)
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	if err := cmd.Start(); err != nil {
-		logFile.Close()
-		return nil, fmt.Errorf("failed to start librespot: %v", err)
-	}
-	log.Printf("Started librespot with args %v", librespotArgs)
+	spotifyToken string
+	librespotCmd *exec.Cmd
+
+	audioBuffer chan []int16
+
+	ctx       context.Context
+	cancel    context.CancelFunc
+	pcmCancel context.CancelFunc
+	mutex     sync.Mutex
+}
+
+func NewRedirector(session *discordgo.Session, guildID, channelID, spotifyToken string) (*Redirector, error) {
+	log.Printf("Creating redirector for guild %s, channel %s", guildID, channelID)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	return &Redirector{
-		botSession:         botSession,
-		guildID:            guildID,
-		voiceChannelID:     voiceChannelID,
-		spotifyAccessToken: spotifyAccessToken,
-		send:               make(chan []int16, 2),
-		cmd:                cmd,
-		ctx:                ctx,
-		cancel:             cancel,
-	}, nil
+	r := &Redirector{
+		botSession:   session,
+		guildID:      guildID,
+		channelID:    channelID,
+		spotifyToken: spotifyToken,
+		audioBuffer:  make(chan []int16, 2),
+		ctx:          ctx,
+		cancel:       cancel,
+	}
+
+	if err := r.startLibrespot(); err != nil {
+		return nil, err
+	}
+
+	return r, nil
 }
 
-func (r *Redirector) checkLibrespot() error {
-	if err := r.cmd.Process.Signal(syscall.Signal(0)); err != nil {
-		output, readErr := os.ReadFile(librespotLogPath)
-		if readErr != nil {
-			return fmt.Errorf("librespot process died: %v (failed to read logs: %v)", err, readErr)
-		}
-		return fmt.Errorf("librespot process died: %v\n%s", err, string(output))
+func (r *Redirector) startLibrespot() error {
+	config := NewLibrespotConfig(r.spotifyToken)
+
+	logFile, err := os.OpenFile(librespotLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open log file: %v", err)
 	}
+
+	args := r.buildLibrespotArgs(config)
+	cmd := exec.Command(librespotPath, args...)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+
+	if err := cmd.Start(); err != nil {
+		logFile.Close()
+		return fmt.Errorf("failed to start librespot: %v", err)
+	}
+
+	r.librespotCmd = cmd
+	log.Printf("Started librespot with args %v", args)
 	return nil
 }
 
-func (r *Redirector) Start() error {
-	go func() {
-		if err := r.healthChecker(); err != nil {
-			log.Printf("Health checker failed: %v", err)
-		}
-	}()
+func (r *Redirector) buildLibrespotArgs(config *LibrespotConfig) []string {
+	args := []string{
+		"--name", config.Name,
+		"--bitrate", config.Bitrate,
+		"--access-token", config.AccessToken,
+		"--backend", config.Backend,
+		"--device", config.Device,
+		"--format", config.Format,
+		"--initial-volume", config.InitialVolume,
+	}
+	if config.VolumeNormalise {
+		args = append(args, "--enable-volume-normalisation")
+	}
+	return args
+}
 
-	voiceChannel, err := r.botSession.ChannelVoiceJoin(r.guildID, r.voiceChannelID, false, true)
-	if err != nil {
+func (r *Redirector) Start() error {
+	pcmCtx, pcmCancel := context.WithCancel(r.ctx)
+	r.pcmCancel = pcmCancel
+
+	go r.monitorHealth()
+
+	if err := r.joinVoiceChannel(); err != nil {
 		return err
 	}
-	r.voiceChannel = voiceChannel
-	log.Printf("Joined voice channel %s", r.voiceChannelID)
 
+	return r.streamAudio(pcmCtx)
+}
+
+func (r *Redirector) joinVoiceChannel() error {
+	vc, err := r.botSession.ChannelVoiceJoin(r.guildID, r.channelID, false, true)
+	if err != nil {
+		return fmt.Errorf("failed to join voice channel: %v", err)
+	}
+
+	r.voiceChannel = vc
+	log.Printf("Joined voice channel %s", r.channelID)
+	return nil
+}
+
+func (r *Redirector) streamAudio(ctx context.Context) error {
 	cmd := exec.Command("sox",
 		"-t", "raw",
 		"-c", "2",
@@ -137,8 +170,12 @@ func (r *Redirector) Start() error {
 		return err
 	}
 
-	go dgvoice.SendPCM(voiceChannel, r.send)
+	go r.sendPCM(ctx, r.voiceChannel)
 
+	return r.processAudioStream(soxOut)
+}
+
+func (r *Redirector) processAudioStream(soxOut io.ReadCloser) error {
 	buffer := make([]byte, 3840)
 	for {
 		select {
@@ -150,7 +187,7 @@ func (r *Redirector) Start() error {
 				return nil
 			}
 			if err != nil {
-				close(r.send)
+				close(r.audioBuffer)
 				return err
 			}
 
@@ -159,28 +196,90 @@ func (r *Redirector) Start() error {
 				pcmData[i/2] = int16(buffer[i]) | (int16(buffer[i+1]) << 8)
 			}
 
-			r.send <- pcmData
+			r.audioBuffer <- pcmData
 		}
 	}
 }
 
-func (r *Redirector) Stop() error {
+func (r *Redirector) Stop() {
 	r.cancel()
+	if r.pcmCancel != nil {
+		r.pcmCancel()
+	}
 	if r.voiceChannel != nil {
 		r.voiceChannel.Disconnect()
 	}
-	return r.cmd.Process.Kill()
+	if r.librespotCmd != nil && r.librespotCmd.Process != nil {
+		r.librespotCmd.Process.Kill()
+	}
 }
 
-func (r *Redirector) healthChecker() error {
-	for {
-		if err := r.checkLibrespot(); err != nil {
-			log.Printf("Health check failed: %v", err)
-			if stopErr := r.Stop(); stopErr != nil {
-				log.Printf("Failed to stop redirector: %v", stopErr)
-			}
-			return err
-		}
-		time.Sleep(10 * time.Second)
+func (r *Redirector) LeaveVoiceChannel() {
+	if r.pcmCancel != nil {
+		r.pcmCancel()
 	}
+
+	if r.voiceChannel != nil {
+		r.voiceChannel.Disconnect()
+	}
+}
+
+func (r *Redirector) monitorHealth() {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-r.ctx.Done():
+			return
+		case <-ticker.C:
+			if err := r.checkLibrespot(); err != nil {
+				log.Printf("Health check failed: %v", err)
+				r.Stop()
+				return
+			}
+		}
+	}
+}
+
+func (r *Redirector) checkLibrespot() error {
+	if err := r.librespotCmd.Process.Signal(syscall.Signal(0)); err != nil {
+		output, readErr := os.ReadFile(librespotLogPath)
+		if readErr != nil {
+			return fmt.Errorf("librespot process died: %v (failed to read logs: %v)", err, readErr)
+		}
+		return fmt.Errorf("librespot process died: %v\n%s", err, string(output))
+	}
+	return nil
+}
+
+func (r *Redirector) ChangeVoiceChannel(channelID string) error {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+
+	if r.pcmCancel != nil {
+		r.pcmCancel()
+	}
+
+	if r.voiceChannel != nil {
+		r.voiceChannel.Disconnect()
+	}
+
+	r.channelID = channelID
+	if err := r.joinVoiceChannel(); err != nil {
+		return err
+	}
+
+	pcmCtx, pcmCancel := context.WithCancel(r.ctx)
+	r.pcmCancel = pcmCancel
+
+	go r.sendPCM(pcmCtx, r.voiceChannel)
+
+	log.Printf("Changed to voice channel %s", channelID)
+	return nil
+}
+
+func (r *Redirector) sendPCM(ctx context.Context, vc *discordgo.VoiceConnection) {
+	dgvoice.SendPCM(vc, r.audioBuffer)
+	<-ctx.Done()
 }

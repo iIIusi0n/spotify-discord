@@ -52,38 +52,42 @@ var (
 	commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.InteractionCreate){
 		"join": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			data := i.ApplicationCommandData()
-
-			token, err := authorizer.AccessToken()
-			if err != nil {
-				s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-					Type: discordgo.InteractionResponseChannelMessageWithSource,
-					Data: &discordgo.InteractionResponseData{
-						Content: fmt.Sprintf("Failed to get access token, login to Spotify first: %s", oauthAccessURL),
-					},
-				})
-				return
-			}
-
-			if proxy != nil {
-				proxy.Stop()
-			}
-
 			voiceChannelID := data.Options[0].ChannelValue(s)
-			proxy, err = redirector.NewRedirector(s, guildID, voiceChannelID.ID, token)
-			if err != nil {
-				s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-					Type: discordgo.InteractionResponseChannelMessageWithSource,
-					Data: &discordgo.InteractionResponseData{
-						Content: fmt.Sprintf("Failed to start redirector: %v", err),
-					},
-				})
-				return
-			}
-			go func() {
-				if err := proxy.Start(); err != nil {
-					log.Printf("Redirector failed to start: %v", err)
+
+			if proxy == nil {
+				token, err := authorizer.AccessToken()
+				if err != nil {
+					s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+						Type: discordgo.InteractionResponseChannelMessageWithSource,
+						Data: &discordgo.InteractionResponseData{
+							Content: fmt.Sprintf("Failed to get access token, login to Spotify first: %s", oauthAccessURL),
+						},
+					})
+					return
 				}
-			}()
+
+				if proxy != nil {
+					proxy.Stop()
+				}
+
+				proxy, err = redirector.NewRedirector(s, guildID, voiceChannelID.ID, token)
+				if err != nil {
+					s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+						Type: discordgo.InteractionResponseChannelMessageWithSource,
+						Data: &discordgo.InteractionResponseData{
+							Content: fmt.Sprintf("Failed to start redirector: %v", err),
+						},
+					})
+					return
+				}
+				go func() {
+					if err := proxy.Start(); err != nil {
+						log.Printf("Redirector failed to start: %v", err)
+					}
+				}()
+			} else {
+				proxy.ChangeVoiceChannel(voiceChannelID.ID)
+			}
 
 			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 				Type: discordgo.InteractionResponseChannelMessageWithSource,
@@ -94,7 +98,7 @@ var (
 		},
 		"leave": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			if proxy != nil {
-				proxy.Stop()
+				proxy.LeaveVoiceChannel()
 			}
 
 			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
